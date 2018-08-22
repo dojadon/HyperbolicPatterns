@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
 
-import sys
-#sys.path.append(r"")
-
 import clr
 clr.AddReference("VecMath")
 
 from VecMath import *
 import math
 
+wavefront_txt = "o Hyperbolic\n" + "mtllib Hyperbolic.mtl\n"
+
 MAX_LAYER = 3
 EPS = 1E-5
 
-triangles = []
+obj_vertices = []
+triangles_mtl = [], []
+
+materials = "Material1", "Material2"
 
 def intersect_pos(p1, d1, p2, d2):
     c1 = d1.y * p1.x - d1.x * p1.y
@@ -50,14 +52,25 @@ def invert(center, r, p):
 
     if abs(d) < EPS: return center
 
-    return center + +v * (r ** 2 / d)
+    return center + v * (r ** 2 / d ** 2)
 
-def add_triangle(vertices, UNIT_ANGLE = math.pi / 36):
-    center = (vertices[0] + vertices[1] + vertices[2]) * (1.0 / 3)
+def add_vertex(vtx):
+    num_vertices = len(obj_vertices)
+    idx = next(iter([i for i in range(num_vertices) if Vector2.EpsilonEquals(obj_vertices[i], vtx, EPS)]), num_vertices)
+
+    if idx == num_vertices:
+        obj_vertices.append(vtx)
+    return idx
+
+def add_triangle(vertices, center, mtl_idx, UNIT_ANGLE = math.pi / 36):
+    triangles = triangles_mtl[mtl_idx]
+
+    def add_triangle_to_list(*vertices):
+        triangles.append([add_vertex(v) for v in vertices])
 
     def add_edge(e1, e2):
         if e1.Length() < EPS or e2.Length() < EPS or (+e1 - +e2).Length() < EPS:
-            triangles.append((center, e1, e2))
+            add_triangle_to_list(center, e1, e2)
             return
         
         successed, c, r = circle_center_pos(e1, e2, invert(Vector2.Zero, 1, e1))
@@ -69,28 +82,33 @@ def add_triangle(vertices, UNIT_ANGLE = math.pi / 36):
         num_split = int(round(abs(angle) / UNIT_ANGLE))
 
         if num_split == 0:
-            triangles.append((center, e1, e2))
+            add_triangle_to_list(center, e1, e2)
             return
 
         mult = 1.0 / num_split
 
+        def interpolate(t):
+            return Vector2.Interpolate(v2, v1, t)
+
         for i in range(num_split):
-            triangles.append((center, c + Vector2.Interpolate(v2, v1, mult * i) * r, c + Vector2.Interpolate(v2, v1, mult * (i + 1)) * r))
+            add_triangle_to_list(center, c + interpolate(mult * i) * r, c + interpolate(mult * (i + 1)) * r)
 
     for i in range(3):
         add_edge(vertices[i], vertices[(i + 1) % 3])
 
-def add_motif(vertices, center, layer):
-    def getvtx(idx, num = len(vertices)):
-        return vertices[idx % num]
+def add_motif(vertices, triangle_centers, center, mtl_idx, layer):
+    num_vertices = len(vertices)
 
-    for i in range(len(vertices)):
-        add_triangle((center, getvtx(i), getvtx(i + 1)))
+    def getvtx(idx):
+        return vertices[idx % num_vertices]
+
+    for i in range(num_vertices):
+        add_triangle((center, getvtx(i), getvtx(i + 1)), triangle_centers[i], (mtl_idx + i) % 2)
     
     if layer >= MAX_LAYER:
         return
 
-    for i in range(len(vertices)):
+    for i in range(num_vertices):
         edge = [getvtx(i), getvtx(i + 1)]
         successed, c, r = circle_center_pos(edge[0], edge[1], invert(Vector2.Zero, 1, edge[0]))
 
@@ -99,26 +117,28 @@ def add_motif(vertices, center, layer):
         if invert_center.Length() < center.Length():
             continue
 
-        inverted_vertices = edge + [invert(c, r, getvtx(i + 2 + j)) for j in range(4)]
+        inverted_vertices = edge + [invert(c, r, getvtx(i + 2 + j)) for j in range(num_vertices - 2)]
+        inverted_triangle_centers = [invert(c, r, triangle_centers[(i + j) % num_vertices]) for j in range(num_vertices)]
 
-        add_motif(inverted_vertices, invert_center, layer + 1)
+        add_motif(inverted_vertices, inverted_triangle_centers, invert_center, (mtl_idx + i + 1) % 2, layer + 1)
+
 
 v = Vector2(0, (math.sqrt(6) - math.sqrt(2)) * 0.5)
-add_motif([v * Matrix2.Rotation(math.pi / 3 * i) for i in range(6)], Vector2.Zero, 0)
+c = v * 0.5 * Matrix2.Rotation(math.pi / 6)
+add_motif([v * Matrix2.Rotation(math.pi / 3 * i) for i in range(6)], [c * Matrix2.Rotation(math.pi / 3 * i) for i in range(6)], Vector2.Zero, 0, 0)
 
 with open("Hyperbolic.obj", "w") as f:
-    vertices_lines = []
-    triangles_lines = []
+    lines = [wavefront_txt]
 
-    vertices = [v for tri in triangles for v in tri]
-    num_vertices = len(vertices)
-
-    for idx, tri in enumerate(triangles):
-        for vtx in tri:
-            line = "v " + " ".join([str(vtx[i]) for i in range(2)]) + " 0\n"
-            vertices_lines.append(line)
-
-        line = "f " + " ".join([str(idx * 3 + j + 1) + "//" for j in range(3)]) + "\n"
-        triangles_lines.append(line)
+    print len(obj_vertices)
+    for vtx in obj_vertices:
+        line = "v " + " ".join([str(vtx[i]) for i in range(2)]) + " 0\n"
+        lines.append(line)
     
-    f.writelines(["o Hyperbolic\n"] + vertices_lines + triangles_lines)
+    for i in range(2):
+        lines.append("usemtl " + materials[i] + "\n")
+
+        for tri in triangles_mtl[i]:
+            line = "f " + " ".join([str(idx + 1) + "//" for idx in tri]) + "\n"
+            lines.append(line)
+    f.writelines(lines)
